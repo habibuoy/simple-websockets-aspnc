@@ -18,7 +18,7 @@ if (app.Environment.IsDevelopment())
     app.MapOpenApi();
 }
 
-app.UseWebSockets(new WebSocketOptions());
+app.UseWebSockets(new WebSocketOptions() { KeepAliveTimeout = TimeSpan.FromSeconds(3) });
 
 app.UseHttpsRedirection();
 
@@ -40,7 +40,20 @@ app.Map("/ws", static async (HttpContext httpContext, ILogger<Program> logger) =
         TimeSpan pingTimeout = TimeSpan.FromSeconds(5);
         DateTime pingTimeoutDt = DateTime.UtcNow.Add(pingTimeout);
 
-        while (true)
+        _ = Task.Run(async () =>
+        {
+            while (websocket.State == WebSocketState.Open)
+            {
+                var message = $"Hello darkness, my old friend! Current time is: {DateTime.Now}";
+                var bytes = Encoding.UTF8.GetBytes(message);
+
+                await websocket.SendAsync(new ArraySegment<byte>(bytes, 0, bytes.Length),
+                        WebSocketMessageType.Text, true, CancellationToken.None);
+                await Task.Delay(1000);
+            }
+        });
+
+        while (websocket.State == WebSocketState.Open)
         {
             if (DateTime.UtcNow > pingTimeoutDt)
             {
@@ -50,46 +63,49 @@ app.Map("/ws", static async (HttpContext httpContext, ILogger<Program> logger) =
                 break;
             }
 
-            var message = $"Hello darkness, my old friend! Current time is: {DateTime.Now}";
-            var bytes = Encoding.UTF8.GetBytes(message);
-
-            await Task.WhenAny(
-                Task.Run(async () =>
-                {
-                    receiveResult = await websocket.ReceiveAsync(buffer, CancellationToken.None);
-                }),
-                Task.Run(async () =>
-                {
-                    await websocket.SendAsync(new ArraySegment<byte>(bytes, 0, bytes.Length),
-                        WebSocketMessageType.Text, true, CancellationToken.None);
-                    await Task.Delay(1000);
-                })
-            );
-
-            if (receiveResult != null)
+            try
             {
-                if (!receiveResult.CloseStatus.HasValue)
+                receiveResult = await websocket.ReceiveAsync(buffer, CancellationToken.None);
+
+                if (receiveResult != null)
                 {
-                    logger.LogInformation("Receiving ping of websocket connection of {ip}.", httpContext.Connection.RemoteIpAddress);
-                    if (receiveResult.MessageType == WebSocketMessageType.Text)
+                    if (!receiveResult.CloseStatus.HasValue)
                     {
-                        var receivedMessage = Encoding.UTF8.GetString(buffer);
-                        logger.LogInformation("Is end of message? {isEnd}. Message: {msg}",
-                            receiveResult.EndOfMessage, receivedMessage);
+                        if (receiveResult.MessageType == WebSocketMessageType.Text)
+                        {
+                            var receivedMessage = Encoding.UTF8.GetString(buffer);
+                            logger.LogInformation("Is end of message? {isEnd}. Message: {msg}",
+                                receiveResult.EndOfMessage, receivedMessage);
+                        }
+                        pingTimeoutDt = DateTime.UtcNow.Add(pingTimeout);
                     }
-                    pingTimeoutDt = DateTime.UtcNow.Add(pingTimeout);
+                    else
+                    {
+                        if (websocket.State == WebSocketState.CloseReceived)
+                        {
+                            logger.LogInformation("Receiving websocket close request {stat}, {desc} of {ip} at {dt}. Closing Websocket",
+                                receiveResult.CloseStatus.Value, receiveResult.CloseStatusDescription,
+                                httpContext.Connection.RemoteIpAddress, DateTime.Now);
+                            await websocket.CloseAsync(receiveResult.CloseStatus.Value, receiveResult.CloseStatusDescription,
+                                CancellationToken.None);
+                        }
+                        break;
+                    }
+                    receiveResult = null!;
                 }
-                else
+            }
+            catch (WebSocketException ex)
+            {
+                logger.LogError("Error happened while receiving result: {ex}. LAST STATE: ({state})", ex, websocket.State);
+                if (websocket.State == WebSocketState.Aborted)
                 {
-                    logger.LogInformation("Receiving websocket close request of {ip}. Closing Websocket", httpContext.Connection.RemoteIpAddress);
-                    await websocket.CloseAsync(receiveResult.CloseStatus.Value, receiveResult.CloseStatusDescription,
-                        CancellationToken.None);
-                    break;
+                    logger.LogInformation("Aborting websocket connection of {ip}.", httpContext.Connection.RemoteIpAddress);
+                    websocket.Abort();
                 }
-                receiveResult = null!;
+                break;
             }
         }
-        
+
         logger.LogInformation("Ending websocket request of {ip}.", httpContext.Connection.RemoteIpAddress);
     }
     else
