@@ -28,31 +28,50 @@ async Task RunWebsocket()
         var buffer = new byte[1024];
         var message = Encoding.UTF8.GetBytes("Ping");
 
-        while (true)
+        _ = Task.Run(async () =>
+        {
+            while (websocket.State == WebSocketState.Open)
+            {
+                await websocket.SendAsync(message, WebSocketMessageType.Text, true, CancellationToken.None);
+                await Task.Delay(500);
+            }
+        });
+
+        while (websocket.State == WebSocketState.Open)
         {
             WebSocketReceiveResult receiveResult = null!;
 
-            await websocket.SendAsync(message, WebSocketMessageType.Text, true, CancellationToken.None);
-            receiveResult = await websocket.ReceiveAsync(new ArraySegment<byte>(buffer), CancellationToken.None);
-
-            if (receiveResult != null)
+            try
             {
-                if (!receiveResult.CloseStatus.HasValue)
+                receiveResult = await websocket.ReceiveAsync(new ArraySegment<byte>(buffer), CancellationToken.None);
+                if (receiveResult != null)
                 {
-                    if (receiveResult.MessageType == WebSocketMessageType.Text)
+                    if (!receiveResult.CloseStatus.HasValue)
                     {
-                        var receivedMessage = Encoding.UTF8.GetString(buffer);
-                        Console.WriteLine($"Message from server: {receivedMessage}");
+                        if (receiveResult.MessageType == WebSocketMessageType.Text)
+                        {
+                            var receivedMessage = Encoding.UTF8.GetString(buffer);
+                            Console.WriteLine($"Message from server: {receivedMessage}");
+                        }
+                    }
+                    else
+                    {
+                        if (websocket.State == WebSocketState.CloseReceived)
+                        {
+                            Console.WriteLine("Server is closing connection at {0}. Stat {1}, desc {2}.",
+                                DateTime.Now, receiveResult.CloseStatus.Value, receiveResult.CloseStatusDescription);
+                            await websocket.CloseAsync(receiveResult.CloseStatus.Value, receiveResult.CloseStatusDescription,
+                                    CancellationToken.None);
+                        }
+                        break;
                     }
                 }
-                else
-                {
-                    await websocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Normal", CancellationToken.None);
-                    break;
-                }
             }
-
-            await Task.Delay(1000);
+            catch (WebSocketException)
+            {
+                Console.WriteLine($"Error happened while receiving message. LAST STATE: ({websocket.State})");
+                break;
+            }
         }
         
         websocket = null!;
