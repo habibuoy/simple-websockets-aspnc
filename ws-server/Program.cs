@@ -1,8 +1,5 @@
-using System.ComponentModel.DataAnnotations;
 using System.Net.WebSockets;
 using System.Text;
-using System.Text.Json;
-using System.Text.Unicode;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -18,7 +15,7 @@ if (app.Environment.IsDevelopment())
     app.MapOpenApi();
 }
 
-app.UseWebSockets(new WebSocketOptions() { KeepAliveTimeout = TimeSpan.FromSeconds(3) });
+app.UseWebSockets();
 
 app.UseHttpsRedirection();
 
