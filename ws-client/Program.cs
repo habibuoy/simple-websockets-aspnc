@@ -5,7 +5,7 @@ using System.Text;
 
 const string WebsocketEndpoint = "wss://localhost:7000/ws";
 
-ClientWebSocket websocket = null;
+ClientWebSocket websocket = null!;
 
 async Task RunWebsocket()
 {
@@ -30,7 +30,7 @@ async Task RunWebsocket()
 
         while (true)
         {
-            WebSocketReceiveResult receiveResult = null;
+            WebSocketReceiveResult receiveResult = null!;
 
             await websocket.SendAsync(message, WebSocketMessageType.Text, true, CancellationToken.None);
             receiveResult = await websocket.ReceiveAsync(new ArraySegment<byte>(buffer), CancellationToken.None);
