@@ -1,6 +1,6 @@
 using System.Net.WebSockets;
 
-namespace SimpleWebSockets.Server.Helper;
+namespace SimpleWebSockets.Server.Helpers;
 
 public class WebsocketTimeoutChecker
 {
