@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Net.WebSockets;
 using System.Text;
 using SimpleWebSockets.Server.Helpers;
@@ -97,6 +98,7 @@ app.Map("/wschat", async ([AsParameters] WsChatRequest chatRequest, HttpContext 
     {
         httpContext.Response.StatusCode = StatusCodes.Status400BadRequest;
         await httpContext.Response.WriteAsJsonAsync(new { Message = "This endpoint only accepts WebSocket requests." });
+        return;
     }
 
     if (chatRequest == null
@@ -105,6 +107,7 @@ app.Map("/wschat", async ([AsParameters] WsChatRequest chatRequest, HttpContext 
     {
         httpContext.Response.StatusCode = StatusCodes.Status400BadRequest;
         await httpContext.Response.WriteAsJsonAsync(new { Message = "Please provide a valid room chat request." });
+        return;
     }
 
     if (!chats.TryGetValue(chatRequest!.ChatRoomId, out var chatRoom)
@@ -112,52 +115,140 @@ app.Map("/wschat", async ([AsParameters] WsChatRequest chatRequest, HttpContext 
     {
         httpContext.Response.StatusCode = StatusCodes.Status400BadRequest;
         await httpContext.Response.WriteAsJsonAsync(new { Message = "Please provide a valid room chat request." });
+        return;
     }
 
     using var webSocket = await httpContext.WebSockets.AcceptWebSocketAsync();
     chatRoom!.AssignWebsocket(chatRequest.User, webSocket);
 
-    string currentTime = DateTime.Now.ToString("HH:mm");
-
-    foreach (var ws in chatRoom.WebSockets)
+    try
     {
-        if (ws != null)
-        {
-            await SendMessageAsync(ws, $"([{currentTime}] User {chatRequest.User}) has joined the chat");
-        }
+        string joinMessage = $"([{GetChatTimeString()}] User {chatRequest.User}) has joined the chat";
+        await BroadcastMessagesAsync(chatRoom.WebSockets!, joinMessage, logger);
+    }
+    catch (InvalidOperationException ex)
+    {
+        logger.LogError(ex, ex.Message);
     }
 
-    var buffer = new byte[1024];
-
-    while (webSocket.State == WebSocketState.Open)
+    try
     {
-        var receiveResult = await webSocket.ReceiveAsync(new ArraySegment<byte>(buffer), CancellationToken.None);
-        if (receiveResult.MessageType == WebSocketMessageType.Close)
+        var messageQueue = new ConcurrentQueue<string>();
+
+        var receiveMessageTask = Task.Run(async () =>
         {
-            foreach (var ws in chatRoom.WebSockets)
+            while (webSocket.State == WebSocketState.Open)
             {
-                if (ws != null)
+                try
                 {
-                    await SendMessageAsync(ws, $"([{currentTime}] User {chatRequest.User}) has left the chat");
+                    var (receiveResult, message) = await ReceiveFullMessageAsync(webSocket);
+                    if (receiveResult.MessageType == WebSocketMessageType.Close)
+                    {
+                        await webSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Client left the chat",
+                            CancellationToken.None);
+                        break;
+                    }
+
+                    int count = message.Count();
+                    if (count == 0)
+                    {
+                        continue;
+                    }
+
+                    string decodedMessage = Encoding.UTF8.GetString([.. message], 0, count);
+                    messageQueue.Enqueue(decodedMessage);
+                }
+                catch (WebSocketException ex)
+                {
+                    logger.LogInformation(ex, "Websocket error happened while receiving full message: {errCode}",
+                        ex.WebSocketErrorCode);
+                    continue;
                 }
             }
-            await webSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Leave", CancellationToken.None);
-            chatRoom.RemoveWebsocket(chatRequest.User);
-            break;
-        }
+        });
 
-        var message = Encoding.UTF8.GetString(buffer, 0, receiveResult.Count);
-        foreach (var ws in chatRoom.WebSockets)
+        var broadcastMessageTask = Task.Run(async () =>
         {
-            if (ws != null)
+            while (webSocket.State == WebSocketState.Open)
             {
-                await SendMessageAsync(ws, $"([{currentTime}] {chatRequest.User}): {message}");
+                if (!messageQueue.TryDequeue(out var message))
+                {
+                    await Task.Delay(100);
+                    continue;
+                }
+
+                try
+                {
+                    await BroadcastMessagesAsync(chatRoom.WebSockets!, $"{chatRequest.User}: {message}", logger);
+                }
+                catch (InvalidOperationException ex)
+                {
+                    logger.LogError(ex, ex.Message);
+                    await webSocket.CloseAsync(WebSocketCloseStatus.InternalServerError, "Error in server",
+                        CancellationToken.None);
+                    break;
+                }
             }
-        }
+        });
+
+        await Task.WhenAll(receiveMessageTask, broadcastMessageTask);
+    }
+    finally
+    {
+        chatRoom.RemoveWebsocket(chatRequest.User);
+        string leftMessage = $"([{GetChatTimeString()}] User {chatRequest.User}) has left the chat";
+        await BroadcastMessagesAsync(chatRoom.WebSockets!, leftMessage, logger);
     }
 });
 
 app.Run();
+
+static string GetChatTimeString()
+{
+    return DateTime.Now.ToString("HH:mm");
+}
+
+static async Task BroadcastMessagesAsync(IEnumerable<WebSocket> webSockets, string message,
+    ILogger logger)
+{
+    if (webSockets == null)
+    {
+        throw new InvalidOperationException("Websockets cannot be null!");
+    }
+
+    foreach (var ws in webSockets)
+    {
+        if (ws == null) continue;
+
+        try
+        {
+            await SendMessageAsync(ws, message);
+        }
+        catch (WebSocketException ex)
+        {
+            logger.LogInformation(ex, "({broadcaster}): There was a websocket error while sending message: {errCode}",
+                nameof(BroadcastMessagesAsync), ex.WebSocketErrorCode);
+            continue;
+        }
+    }
+}
+
+static async Task<(WebSocketReceiveResult, IEnumerable<byte>)> ReceiveFullMessageAsync(WebSocket ws)
+{
+    var buffer = new byte[1024];
+    List<byte> message = new();
+
+    WebSocketReceiveResult receiveResult;
+
+    do
+    {
+        receiveResult = await ws.ReceiveAsync(new ArraySegment<byte>(buffer), CancellationToken.None);
+        message.AddRange(new ArraySegment<byte>(buffer, 0, receiveResult.Count));
+    }
+    while (!receiveResult.EndOfMessage);
+
+    return (receiveResult, message);
+}
 
 static async Task ReceiveMessageAsync(WebSocket websocket, ILogger logger, HttpContext httpContext,
     Action? onMessageReceived = null)
