@@ -121,10 +121,13 @@ app.Map("/wschat", async ([AsParameters] WsChatRequest chatRequest, HttpContext 
     using var webSocket = await httpContext.WebSockets.AcceptWebSocketAsync();
     chatRoom!.AssignWebsocket(chatRequest.User, webSocket);
 
+    var cts = new CancellationTokenSource();
+    var cancelToken = cts.Token;
+
     try
     {
         string joinMessage = $"([{GetChatTimeString()}] User {chatRequest.User}) has joined the chat";
-        await BroadcastMessagesAsync(chatRoom.WebSockets!, joinMessage, logger);
+        await BroadcastMessagesAsync(chatRoom.WebSockets!, joinMessage, logger, cancelToken);
     }
     catch (InvalidOperationException ex)
     {
@@ -137,13 +140,15 @@ app.Map("/wschat", async ([AsParameters] WsChatRequest chatRequest, HttpContext 
 
         var receiveMessageTask = Task.Run(async () =>
         {
-            while (webSocket.State == WebSocketState.Open)
+            while (webSocket.State == WebSocketState.Open
+                && !cancelToken.IsCancellationRequested)
             {
                 try
                 {
-                    var (receiveResult, message) = await ReceiveFullMessageAsync(webSocket);
+                    var (receiveResult, message) = await ReceiveFullMessageAsync(webSocket, cancelToken);
                     if (receiveResult.MessageType == WebSocketMessageType.Close)
                     {
+                        logger.LogInformation("User {usr} sending close conenction requst", chatRequest.User);
                         await webSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Client left the chat",
                             CancellationToken.None);
                         break;
@@ -156,6 +161,13 @@ app.Map("/wschat", async ([AsParameters] WsChatRequest chatRequest, HttpContext 
                     }
 
                     string decodedMessage = Encoding.UTF8.GetString([.. message], 0, count);
+
+                    if (decodedMessage == "CANCEL")
+                    {
+                        logger.LogInformation("{user} proposed CANCEL", chatRequest.User);
+                        break;
+                    }
+
                     messageQueue.Enqueue(decodedMessage);
                 }
                 catch (WebSocketException ex)
@@ -164,12 +176,17 @@ app.Map("/wschat", async ([AsParameters] WsChatRequest chatRequest, HttpContext 
                         ex.WebSocketErrorCode);
                     continue;
                 }
+                catch (OperationCanceledException)
+                {
+
+                }
             }
         });
 
         var broadcastMessageTask = Task.Run(async () =>
         {
-            while (webSocket.State == WebSocketState.Open)
+            while (webSocket.State == WebSocketState.Open
+                && !cancelToken.IsCancellationRequested)
             {
                 if (!messageQueue.TryDequeue(out var message))
                 {
@@ -179,7 +196,8 @@ app.Map("/wschat", async ([AsParameters] WsChatRequest chatRequest, HttpContext 
 
                 try
                 {
-                    await BroadcastMessagesAsync(chatRoom.WebSockets!, $"{chatRequest.User}: {message}", logger);
+                    await BroadcastMessagesAsync(chatRoom.WebSockets!, $"{chatRequest.User}: {message}", logger,
+                        cts.Token);
                 }
                 catch (InvalidOperationException ex)
                 {
@@ -188,16 +206,27 @@ app.Map("/wschat", async ([AsParameters] WsChatRequest chatRequest, HttpContext 
                         CancellationToken.None);
                     break;
                 }
+                catch (OperationCanceledException)
+                {
+
+                }
             }
         });
 
-        await Task.WhenAll(receiveMessageTask, broadcastMessageTask);
+        await Task.WhenAny(receiveMessageTask, broadcastMessageTask);
+        cts.Cancel();
     }
     finally
     {
+        if (webSocket.State != WebSocketState.Closed
+            || webSocket.State != WebSocketState.CloseSent)
+        {
+            await webSocket.CloseAsync(WebSocketCloseStatus.EndpointUnavailable, "Server closed the connection",
+                CancellationToken.None);
+        }
         chatRoom.RemoveWebsocket(chatRequest.User);
         string leftMessage = $"([{GetChatTimeString()}] User {chatRequest.User}) has left the chat";
-        await BroadcastMessagesAsync(chatRoom.WebSockets!, leftMessage, logger);
+        await BroadcastMessagesAsync(chatRoom.WebSockets!, leftMessage, logger, CancellationToken.None);
     }
 });
 
@@ -209,7 +238,7 @@ static string GetChatTimeString()
 }
 
 static async Task BroadcastMessagesAsync(IEnumerable<WebSocket> webSockets, string message,
-    ILogger logger)
+    ILogger logger, CancellationToken cancellationToken)
 {
     if (webSockets == null)
     {
@@ -222,7 +251,7 @@ static async Task BroadcastMessagesAsync(IEnumerable<WebSocket> webSockets, stri
 
         try
         {
-            await SendMessageAsync(ws, message);
+            await SendMessageAsync(ws, message, cancellationToken);
         }
         catch (WebSocketException ex)
         {
@@ -233,7 +262,8 @@ static async Task BroadcastMessagesAsync(IEnumerable<WebSocket> webSockets, stri
     }
 }
 
-static async Task<(WebSocketReceiveResult, IEnumerable<byte>)> ReceiveFullMessageAsync(WebSocket ws)
+static async Task<(WebSocketReceiveResult, IEnumerable<byte>)> ReceiveFullMessageAsync(WebSocket ws,
+    CancellationToken cancellationToken)
 {
     var buffer = new byte[1024];
     List<byte> message = new();
@@ -242,7 +272,7 @@ static async Task<(WebSocketReceiveResult, IEnumerable<byte>)> ReceiveFullMessag
 
     do
     {
-        receiveResult = await ws.ReceiveAsync(new ArraySegment<byte>(buffer), CancellationToken.None);
+        receiveResult = await ws.ReceiveAsync(new ArraySegment<byte>(buffer), cancellationToken);
         message.AddRange(new ArraySegment<byte>(buffer, 0, receiveResult.Count));
     }
     while (!receiveResult.EndOfMessage);
@@ -311,19 +341,20 @@ static async Task ReceiveMessageAsync(WebSocket websocket, ILogger logger, HttpC
     }
 }
 
-static async Task SendMessageAsync(WebSocket websocket, string message)
+static async Task SendMessageAsync(WebSocket websocket, string message,
+    CancellationToken cancellationToken)
 {
     var bytes = Encoding.UTF8.GetBytes(message);
 
     await websocket.SendAsync(new ArraySegment<byte>(bytes, 0, bytes.Length),
-        WebSocketMessageType.Text, true, CancellationToken.None);
+        WebSocketMessageType.Text, true, cancellationToken);
 }
 
 static async Task SendEndlessMessageAsync(WebSocket websocket, string message, int interval = 1000)
 {
     while (websocket.State == WebSocketState.Open)
     {
-        await SendMessageAsync(websocket, message);
+        await SendMessageAsync(websocket, message, CancellationToken.None);
         await Task.Delay(interval);
     }
 }
