@@ -79,14 +79,19 @@ app.MapPost("/chat", async ([AsParameters] ChatRequest chatRequest, HttpContext 
         return Results.BadRequest(new { Message = "Please provide a valid room chat request." });
     }
 
-    if (chats.Values.FirstOrDefault(cr => cr.HasUser(chatRequest!.Sender)
-        && cr.HasUser(chatRequest.Recipient)) is not ChatRoom chatRoom)
+    if (chatRequest.Sender == chatRequest.Recipient)
     {
-        chatRoom = ChatRoom.Create();
-        chatRoom.AssignUser(chatRequest.Sender);
-        chatRoom.AssignUser(chatRequest.Recipient);
-        chats.Add(chatRoom.Id, chatRoom);
+        return Results.BadRequest(new { Message = "Cannot create or search chat with same sender and recipient." });
     }
+
+    if (chats.Values.FirstOrDefault(cr => cr.HasUser(chatRequest!.Sender)
+            && cr.HasUser(chatRequest.Recipient)) is not ChatRoom chatRoom)
+        {
+            chatRoom = ChatRoom.Create();
+            chatRoom.AssignUser(chatRequest.Sender);
+            chatRoom.AssignUser(chatRequest.Recipient);
+            chats.Add(chatRoom.Id, chatRoom);
+        }
 
     return Results.Ok(new { Message = "", Result = chatRoom.ToChatResult() });
 });
@@ -113,8 +118,16 @@ app.Map("/wschat", async ([AsParameters] WsChatRequest chatRequest, HttpContext 
     if (!chats.TryGetValue(chatRequest!.ChatRoomId, out var chatRoom)
         || !chatRoom.HasUser(chatRequest.User))
     {
-        httpContext.Response.StatusCode = StatusCodes.Status400BadRequest;
-        await httpContext.Response.WriteAsJsonAsync(new { Message = "Please provide a valid room chat request." });
+        httpContext.Response.StatusCode = StatusCodes.Status404NotFound;
+        await httpContext.Response.WriteAsJsonAsync(new { Message = "Chat not found." });
+        return;
+    }
+
+    if (chatRoom != null
+        && chatRoom.IsWebsocketAssigned(chatRequest.User))
+    {
+        httpContext.Response.StatusCode = StatusCodes.Status403Forbidden;
+        await httpContext.Response.WriteAsJsonAsync(new { Message = "User already in chat." });
         return;
     }
 

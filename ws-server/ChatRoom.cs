@@ -32,6 +32,16 @@ public class ChatRoom
         websocketUsers.Add(user, null);
     }
 
+    public bool IsWebsocketAssigned(string user)
+    {
+        if (!websocketUsers.ContainsKey(user))
+        {
+            throw new KeyNotFoundException($"User {user} not found");
+        }
+
+        return websocketUsers[user] != null;
+    }
+
     public void AssignWebsocket(string user, WebSocket webSocket)
     {
         if (!websocketUsers.ContainsKey(user))
