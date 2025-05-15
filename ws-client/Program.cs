@@ -225,7 +225,6 @@ async Task RunWebsocket()
                         {
                             await websocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Ending chat",
                                 CancellationToken.None);
-                            websocket = null;
                             break;
                         }
 
@@ -244,6 +243,7 @@ async Task RunWebsocket()
 
             await receivingTask;
             await sendingTask;
+            websocket = null;
         }
 
         answer = string.Empty;
